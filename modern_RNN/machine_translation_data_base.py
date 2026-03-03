@@ -1,6 +1,7 @@
 import os
 import torch
 from d2l import torch as d2l
+from RNN_study.text_pre_process import Vocab
 
 
 #@save
@@ -58,3 +59,40 @@ source, target = tokenize_nmt(text)
 # print(len(source), len(target))
 # print(source[:10])
 # print(target[:10])
+
+
+src_vocab = Vocab(source,min_freq=2,reserved_tokens=['<pad>', '<bos>', '<eos>'])
+
+# print(list(src_vocab.token_to_idx.items())[:48])
+# [('<unk>', 0), ('<pad>', 1), ('<bos>', 2), ('<eos>', 3), ('.', 4), ('i', 5), ('you', 6), ('to', 7), ('the', 8), ('?', 9)]
+# print(src_vocab[source[0]])
+#[47,4]
+#对应词表中的go .
+
+'''
+如果文本序列长度长于num_steps，那么直接截断
+反之，用<pad>词元补齐
+'''
+
+def truncate_pad(line,num_steps,padding_token):
+    if len(line)>num_steps:
+        return line[:num_steps]
+
+    return line+[padding_token]*(num_steps-len(line))
+
+# print(truncate_pad(src_vocab[source[0]],10,src_vocab['<pad>']))
+#[47, 4, 1, 1, 1, 1, 1, 1, 1, 1]
+
+
+def build_array_nmt(lines,vocab,num_steps):
+    lines=[vocab[l] for l in lines]
+    lines=[l+[vocab['<eos>']] for l in lines]
+    array=torch.tensor([truncate_pad(l,num_steps,vocab['<pad>']) for l in lines])
+    '''虽然截断了但是还要计算原有长度'''
+    valid_len=(array!=vocab['<pad>']).type(torch.int32).sum(1)
+    '''
+    如果元素 不是 <pad>（即是真实单词），结果为 True (相当于 1)。
+    如果元素 是 <pad>（即填充位），结果为 False (相当于 0)。
+    '''
+    return array,valid_len
+
