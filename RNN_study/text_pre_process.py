@@ -56,41 +56,53 @@ self._token_freqs是一个按frequency从高到低排序的list，元素均为tu
 self.idx_to_token将idx转为token，是一个list   List[str]
 self.token_to_idx将token转为idx，是一个字典    Dict[str, int]
 '''
+
+
 class Vocab:
-    def __init__(self, tokens=None,min_freq=0,reserved_tokens=None):
-        if tokens is None:
-            tokens = []
+    def __init__(self, corpus=None, min_freq=0, reserved_tokens=None):
+        # 1. 处理保留词，确保包含 <unk>
         if reserved_tokens is None:
             reserved_tokens = []
+        # 强制加入必要的保留词，避免顺序错乱导致索引错误
+        necessary_tokens = ['<pad>', '<bos>', '<eos>', '<unk>']
+        for token in necessary_tokens:
+            if token not in reserved_tokens:
+                reserved_tokens.append(token)
 
-        counter=count_corpus(tokens)
+        self.tokens = list(reserved_tokens)
 
-        '''
-        counter本身是按插入顺序排序的
-        现在按频率排序
-        '''
-        self._token_freqs=sorted(counter.items(),key=lambda x:x[1],reverse=True)
+        # 2. 构建词到索引的映射
+        self.token_to_idx = {token: idx for idx, token in enumerate(self.tokens)}
 
-        '''
+        # 3. 【关键修改】将 unk 设置为整数索引，而不是方法
+        self.unk = self.token_to_idx['<unk>']
 
-        | 索引→token | `_idx_to_token` | 解码：将模型输出转回文本 | `idx=2` → `'the'` |
-        | token→索引 | `_token_to_idx` | 编码：将文本转为模型输入 | `'the'` → `idx=2` |
-        
-        '''
+        # ... 后续处理 corpus 统计词频的逻辑 ...
+        if corpus:
+            # 展平并统计频率
+            from collections import Counter
+            if isinstance(corpus, dict):  # 如果传入的是 Counter
+                counter = corpus
+            else:  # 如果传入的是列表
+                counter = Counter(token for line in corpus for token in line)
 
-        self.idx_to_token=['<unk>']+reserved_tokens
-        self.token_to_idx={token:idx
-                           for idx,token in enumerate(self.idx_to_token)} ### 字典： (token:idx)
-        for token,freq in self._token_freqs:
-            if freq<min_freq:
-                break
-            if token not in  self.token_to_idx:
-                self.idx_to_token.append(token)
-                self.token_to_idx[token]=len(self.idx_to_token)-1
-                '''token_to_idx前面是特殊词，后面是频率由高到低的一般词，idx即其索引'''
+            # 过滤低频词
+            for token, freq in counter.items():
+                if freq >= min_freq and token not in self.token_to_idx:
+                    self.tokens.append(token)
+                    self.token_to_idx[token] = len(self.tokens) - 1
+
+            # 更新 unk 索引 (虽然通常不变，但为了严谨)
+            self.unk = self.token_to_idx['<unk>']
+
+    def __getitem__(self, tokens):
+        if not isinstance(tokens, (list, tuple)):
+            # 这里 self.unk 现在是整数了，可以直接使用
+            return self.token_to_idx.get(tokens, self.unk)
+        return [self.__getitem__(token) for token in tokens]
 
     def __len__(self):
-        return len(self.idx_to_token)
+        return len(self.tokens)
 
     '''
     用法1:单个词 → 单个索引
@@ -106,8 +118,7 @@ class Vocab:
             return self.idx_to_token[indices]
         return [self.idx_to_token[index] for index in indices]
 
-    def unk(self):
-        return 0
+
 
     def token_freqs(self):
         return self._token_freqs  ###token-freq的sorted 字典
