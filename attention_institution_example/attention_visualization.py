@@ -40,8 +40,8 @@ def show_heatmaps(matrices,xlabel,ylabel,titles=None,figsize=(5,5),
 # '''eye音同I，即创造单位矩阵'''
 # show_heatmaps(attention_weights,xlabel='Keys',ylabel='Queries')
 
-random_matrix = torch.rand(1, 1, 10, 10)
-print(random_matrix)
-softmax_random_matrix = torch.softmax(random_matrix,dim=-1)
-print(softmax_random_matrix)
-show_heatmaps(softmax_random_matrix,xlabel='Keys',ylabel='Queries')
+# random_matrix = torch.rand(1, 1, 10, 10)
+# print(random_matrix)
+# softmax_random_matrix = torch.softmax(random_matrix,dim=-1)
+# print(softmax_random_matrix)
+# show_heatmaps(softmax_random_matrix,xlabel='Keys',ylabel='Queries')
