@@ -35,6 +35,13 @@ def show_heatmaps(matrices,xlabel,ylabel,titles=None,figsize=(5,5),
                 ax.set_title(titles[j])
     fig.colorbar(pcm,ax=axes,shrink=0.6)
     plt.show()
-attention_weights=torch.eye(10).reshape((1,1,10,10))
-'''eye音同I，即创造单位矩阵'''
-show_heatmaps(attention_weights,xlabel='Keys',ylabel='Queries')
+
+# attention_weights=torch.eye(10).reshape((1,1,10,10))
+# '''eye音同I，即创造单位矩阵'''
+# show_heatmaps(attention_weights,xlabel='Keys',ylabel='Queries')
+
+random_matrix = torch.rand(1, 1, 10, 10)
+print(random_matrix)
+softmax_random_matrix = torch.softmax(random_matrix,dim=-1)
+print(softmax_random_matrix)
+show_heatmaps(softmax_random_matrix,xlabel='Keys',ylabel='Queries')
