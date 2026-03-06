@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from d2l import torch as d2l
 from attention_visualization import show_heatmaps
-
+import torch.nn.functional as F
 '''
 torch.repeat_interleave(
     input,       # 输入张量（这里是 valid_lens）
