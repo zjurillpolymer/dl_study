@@ -2,12 +2,13 @@ import math
 import torch
 from torch import nn
 from d2l import torch as d2l
-
+from attention_score_function import DotProductAttention
 '''
 原始 X：(2, 3, 4) → reshape 后：(2, 3, 2, 2)（拆分成 2 个头，每个头 2 维）
 permute 后：(2, 2, 3, 2)（把 “头” 提到第二个维度，每个头对应 3 个单词的 2 维特征）
 最终 return：(2*2=4, 3, 2)（合并批次和头，变成 4 个 “虚拟样本”，每个样本 3 个单词的 2 维特征）
 '''
+
 
 def transpose_qkv(X,num_heads):
     #输⼊X的形状: (batch_size，查询或者“键－值”对的个数，num_hiddens)
@@ -26,7 +27,7 @@ class MultiheadAttention(nn.Module):
     def __init__(self, key_size, query_size, value_size, num_hiddens, num_heads, dropout, bias=False, **kwargs):
         super(MultiheadAttention, self).__init__(**kwargs)
         self.num_heads = num_heads
-        self.attention=d2l.DotProductAttention(dropout)
+        self.attention=DotProductAttention(dropout)
         self.num_hiddens=num_hiddens
         self.d_k=num_hiddens//num_heads
 
@@ -48,10 +49,13 @@ class MultiheadAttention(nn.Module):
             valid_lens=torch.repeat_interleave(
                 valid_lens,repeats=self.num_heads,dim=0
             )
-        output=self.attention(queries,keys,values,valid_lens)
+
+        output,attention_weights=self.attention(queries,keys,values,valid_lens)
+
+        attention_weights=attention_weights.reshape(-1,self.num_heads,attention_weights.shape[1],attention_weights.shape[2])
 
         output_concat=transpose_output(output,self.num_heads)
-        return self.W_o(output_concat)
+        return self.W_o(output_concat),attention_weights
 
     def get_head_importance_L2(self):
 
@@ -84,11 +88,23 @@ class MultiheadAttention(nn.Module):
         return head_importance
 
 
+    def get_head_importance_var(self):
+        head_importance=[]
+        output,attention_weights=self.forward(queries,keys,values,valid_lens)
+        for head_idx in range(self.num_heads):
+            weights=attention_weights[:,head_idx,:,:]
+            head_var_sum=0
+            for i in range(weights.shape[0]):
+                head_var=torch.var(weights[i])
+                head_var_sum+=head_var
+            head_importance.append(head_var_sum/attention_weights.shape[0])
+        return head_importance
+
 
 
 
     def prune_least_importance_head(self):
-        head_importance=self.get_head_importance_L2()
+        head_importance=self.get_head_importance_var()
 
         least_important_idx=torch.argmin(torch.tensor(head_importance)).item()
         print(f"裁剪第 {least_important_idx} 个头（重要性分数：{head_importance[least_important_idx]:.4f}）")
@@ -171,11 +187,11 @@ valid_lens = torch.tensor([8, 10])  # 有效长度
 
 # 3. 原模型前向输出
 original_output = model(queries, keys, values, valid_lens)
-print(f"原模型输出形状：{original_output.shape}")  # (2, 10, 512)
 
 # 4. 裁剪最不重要的头
 pruned_model = model.prune_least_importance_head()
 
 # 5. 裁剪后模型前向输出
-pruned_output = pruned_model(queries, keys, values, valid_lens)
+# 5. 裁剪后模型前向输出
+pruned_output, pruned_attention_weights = pruned_model(queries, keys, values, valid_lens)
 print(f"裁剪后模型输出形状：{pruned_output.shape}")  # (2, 10, 448)（512 - 64 = 448）
