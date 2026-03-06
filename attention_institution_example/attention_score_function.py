@@ -89,11 +89,11 @@ class DotProductAttention(nn.Module):
 
     def forward(self,queries,keys,values,valid_lens=None):
 
-        d=queries.shape[-1]
+        d_k=queries.shape[-1]
 
-        scores=torch.bmm(queries,keys.transpose(1,2)/math.sqrt(d))
+        scores=torch.bmm(queries,keys.transpose(1,2)/math.sqrt(d_k))
         self.attentention_weights=masked_softmax(scores,valid_lens)
-        return torch.bmm(self.dropout(self.attention_weights), values)
+        return torch.bmm(self.dropout(self.attention_weights), values),self.attention_weights
 
 queries=torch.normal(0,1,(2,1,2))
 attention=DotProductAttention(dropout=0.5)
