@@ -87,13 +87,26 @@ class DotProductAttention(nn.Module):
     # values的形状：(batch_size，“键－值”对的个数，值的维度)
     # valid_lens的形状:(batch_size，)或者(batch_size，查询的个数)
 
-    def forward(self,queries,keys,values,valid_lens=None):
+    def forward(self, queries, keys, values, valid_lens=None):
+        d_k = queries.shape[-1]
+        # 1. 计算原始注意力分数（未softmax）
+        scores = torch.bmm(queries, keys.transpose(1, 2)) / torch.sqrt(torch.tensor(d_k, dtype=torch.float32))
 
-        d_k=queries.shape[-1]
+        # 2. 处理有效长度（如果有）
+        if valid_lens is not None:
+            mask = torch.ones_like(scores)
+            for i, vl in enumerate(valid_lens):
+                mask[i, :, vl:] = -1e9
+            scores += mask
 
-        scores=torch.bmm(queries,keys.transpose(1,2)/math.sqrt(d_k))
-        self.attentention_weights=masked_softmax(scores,valid_lens)
-        return torch.bmm(self.dropout(self.attention_weights), values),self.attention_weights
+        # 3. 计算softmax后的注意力分数（这就是我们要的分数矩阵）
+        attention_weights = F.softmax(scores, dim=-1)
+
+        # 4. 计算最终输出（原来的逻辑）
+        output = torch.bmm(self.dropout(attention_weights), values)
+
+        # 关键：同时返回输出和注意力分数
+        return output, attention_weights  # 新增返回attention_weights
 
 queries=torch.normal(0,1,(2,1,2))
 attention=DotProductAttention(dropout=0.5)
