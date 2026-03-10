@@ -36,6 +36,7 @@ from matplotlib import pyplot as plt
 
 
 ### 动量法需要维护速度，即states
+### 初始化状态参数
 def init_momentum_states(feature_dim):
     v_w=torch.zeros((feature_dim,1))
     v_b=torch.zeros(1)
@@ -45,7 +46,7 @@ def init_momentum_states(feature_dim):
 def sgd_momentum(params,states,hyperparams):
     for p,v in zip(params,states):
         with torch.no_grad():
-            v[:]=hyperparams['momentum']*v+p.grad
+            v[:]=hyperparams['momentum']*v+p.grad  ## p代表自变量
             p[:]-=hyperparams['lr']*v
         p.grad.data.zero_()
 
