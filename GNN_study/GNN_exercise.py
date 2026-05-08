@@ -179,7 +179,186 @@ def normalize_adj(adj):
 
 
 # ============================================================
-# 4. 实战：Zachary's Karate Club —— 节点分类
+# 4. GAT (Graph Attention Network) —— 动态学边权
+# ============================================================
+# GCN 的缺陷：所有邻居的权重由"度数"决定，是固定的。
+#   A 有 2 个邻居，每个邻居权重 = 1/2
+#   B 有 100 个邻居，每个邻居权重 = 1/100
+#   但事实上，这 100 个邻居对 B 的重要性可能完全不同。
+#
+# GAT 的核心改进 —— 自注意力 (Self-Attention)：
+#   每个节点自己学会"谁的发言更重要"
+#
+#   公式：
+#     ① 算分：  e_ij = LeakyReLU( a^T · [W h_i || W h_j] )
+#     ② 归一化：α_ij = softmax_j(e_ij)  只对邻居做 softmax
+#     ③ 聚合：  h_i' = σ( Σ α_ij · W h_j )
+#
+#     其中 a 是可学习的"注意力向量"（参数）
+#
+#   对比拓扑排序 Kahn 算法：
+#     Kahn 用"入度=0"决定处理顺序 —— 这是硬规则
+#     GAT 用"注意力分数高"决定谁的贡献大 —— 这是软权重，从数据中学
+#
+# GAT 还引入了多头注意力 (Multi-head Attention)：
+#   多个注意力头独立计算，结果拼接/平均
+#   类比：一个头关注"结构相似"，另一个关注"特征相似"
+
+
+class GATLayer(nn.Module):
+    """
+    图注意力层 (Graph Attention Layer)
+    (Veličković et al., ICLR 2018)
+
+    相比 GCN 的两个关键区别：
+      - 每个邻居的权重是动态计算的（不是固定的归一化系数）
+      - 同一个节点在不同层中可以有不同"关注重点"
+    """
+
+    def __init__(self, in_features, out_features, dropout=0.6, alpha=0.2):
+        """
+        in_features:  输入特征维度
+        out_features: 每个注意力头的输出维度
+        dropout:      注意力 dropout
+        alpha:        LeakyReLU 的负斜率
+        """
+        super().__init__()
+        self.dropout = dropout
+        self.out_features = out_features
+
+        # 线性变换: W
+        self.W = nn.Linear(in_features, out_features, bias=False)
+        # 注意力向量: a  (2 * out_features 因为拼接了两个节点的特征)
+        self.a = nn.Parameter(torch.empty(2 * out_features))
+        self.leaky_relu = nn.LeakyReLU(alpha)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.W.weight)
+        nn.init.xavier_uniform_(self.a.unsqueeze(0))
+
+    def forward(self, x, adj):
+        """
+        x:   [num_nodes, in_features]
+        adj: [num_nodes, num_nodes]  邻接矩阵（0/1）
+
+        返回: [num_nodes, out_features]
+        """
+        n = x.size(0)
+        # 1. 线性变换
+        Wh = self.W(x)                    # [n, out_features]
+
+        # 2. 计算所有节点对的注意力分数
+        #    拼接 (Wh_i || Wh_j) → 用广播计算所有 i, j 对
+        Wh_i = Wh.unsqueeze(1)            # [n, 1, out_features]
+        Wh_j = Wh.unsqueeze(0)            # [1, n, out_features]
+        concat = torch.cat([               # [n, n, 2*out_features]
+            Wh_i.expand(n, n, -1),
+            Wh_j.expand(n, n, -1)
+        ], dim=-1)
+
+        # 3. 用 a 打分 + LeakyReLU
+        e = self.leaky_relu(concat @ self.a)  # [n, n, 1] → [n, n]
+
+        # 4. 只保留邻居的分数（mask 掉非邻居）
+        e = e.masked_fill(adj == 0, float('-inf'))
+
+        # 5. Softmax 归一化（只对每个节点的邻居做）
+        attn = F.softmax(e, dim=1)             # [n, n]
+
+        # 6. Dropout（防止过拟合）
+        attn = F.dropout(attn, self.dropout, training=self.training)
+
+        # 7. 加权聚合邻居消息
+        h = attn @ Wh                          # [n, out_features]
+
+        return h
+
+
+class GAT(nn.Module):
+    """
+    2 层 GAT 用于节点分类
+
+    第一层: 多头注意力 (8 头)，每个头独立参数，拼接输出
+    第二层: 单头注意力，输出分类 logits
+    """
+
+    def __init__(self, in_features, hidden_features, num_classes,
+                 num_heads=8, dropout=0.6, alpha=0.2):
+        super().__init__()
+        self.dropout = dropout
+        self.num_heads = num_heads
+        self.hidden_features = hidden_features
+
+        # 第一层: num_heads 个独立注意力头
+        self.heads = nn.ModuleList([
+            GATLayer(in_features, hidden_features, dropout, alpha)
+            for _ in range(num_heads)
+        ])
+        # 第二层: 单头，输出分类
+        self.conv2 = GATLayer(hidden_features * num_heads, num_classes,
+                              dropout, alpha)
+
+    def forward(self, x, adj):
+        # 第一层: 每个头独立计算，拼接
+        heads = []
+        for head in self.heads:
+            h = head(x, adj)
+            heads.append(h)
+        x = torch.cat(heads, dim=-1)   # [n, hidden_features * num_heads]
+        x = F.elu(x)
+        x = F.dropout(x, self.dropout, training=self.training)
+
+        # 第二层: 单头输出
+        x = self.conv2(x, adj)
+        return x
+
+
+def train_karate_club_gat():
+    """训练 GAT 在空手道俱乐部数据上做节点分类"""
+    print("\n" + "=" * 60)
+    print("空手道俱乐部 —— GAT 节点分类")
+    print("=" * 60)
+
+    adj, features, labels, train_mask = load_karate_club()
+
+    model = GAT(in_features=34, hidden_features=8, num_classes=2,
+                num_heads=8, dropout=0.6)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01,
+                                 weight_decay=5e-4)
+
+    print(f"训练样本: {train_mask.sum().item()} 个")
+    print(f"节点总数: {features.size(0)} 个")
+    print(f"注意力头数: 8")
+    print("=" * 60)
+
+    model.train()
+    for epoch in range(200):
+        optimizer.zero_grad()
+        out = model(features, adj)
+        loss = F.cross_entropy(out[train_mask], labels[train_mask])
+        loss.backward()
+        optimizer.step()
+
+        if (epoch + 1) % 20 == 0:
+            pred = out.argmax(dim=1)
+            train_acc = (pred[train_mask] == labels[train_mask]).float().mean()
+            test_acc = (pred[~train_mask] == labels[~train_mask]).float().mean()
+            print(f"  Epoch {epoch + 1:3d} | Loss: {loss.item():.4f} | "
+                  f"Train Acc: {train_acc:.2f} | Test Acc: {test_acc:.2f}")
+
+    model.eval()
+    with torch.no_grad():
+        out = model(features, adj)
+        pred = out.argmax(dim=1)
+        acc = (pred == labels).float().mean()
+        print(f"\n最终准确率: {acc:.2%} ({int(pred.sum())} / {len(labels)})")
+
+    return model, features, adj, labels, pred
+
+
+# ============================================================
+# 5. 实战：Zachary's Karate Club —— 节点分类
 # ============================================================
 # 经典图数据集：一个空手道俱乐部的 34 个成员，
 # 因教练 vs 管理员的分裂形成两个社区。
@@ -292,11 +471,17 @@ def train_karate_club():
     return model, features, adj, labels, pred
 
 
-def visualize_embeddings(model, features, adj, labels, pred):
-    """用 t-SNE 可视化 GCN 学到的节点嵌入"""
+def visualize_embeddings(model, features, adj, labels, pred, model_name="GCN"):
+    """用 t-SNE 可视化 GNN 学到的节点嵌入"""
     # 提取第一层输出作为节点嵌入
     with torch.no_grad():
-        embeddings = model.conv1(features, adj).numpy()
+        if hasattr(model, 'heads'):
+            # GAT: 拼接所有注意力头的输出
+            heads_out = [head(features, adj) for head in model.heads]
+            embeddings = torch.cat(heads_out, dim=-1).numpy()
+        else:
+            # GCN: 直接取第一层
+            embeddings = model.conv1(features, adj).numpy()
 
     # t-SNE 降维到 2D
     tsne = TSNE(n_components=2, random_state=42)
@@ -311,7 +496,7 @@ def visualize_embeddings(model, features, adj, labels, pred):
         plt.text(emb_2d[i, 0] + 0.3, emb_2d[i, 1] + 0.3, str(i),
                  fontsize=9)
 
-    plt.title("GCN Node Embeddings (t-SNE)")
+    plt.title(f"{model_name} Node Embeddings (t-SNE)")
     # 图例
     from matplotlib.patches import Patch
     legend_elements = [
@@ -320,15 +505,25 @@ def visualize_embeddings(model, features, adj, labels, pred):
     ]
     plt.legend(handles=legend_elements)
     plt.tight_layout()
-    save_path = os.path.join(SCRIPT_DIR, "karate_embeddings.png")
+    save_path = os.path.join(SCRIPT_DIR, f"karate_embeddings_{model_name.lower()}.png")
     plt.savefig(save_path, dpi=150)
     print(f"\n嵌入可视化已保存 -> {save_path}")
 
 
 # ============================================================
-# 5. 运行所有 Demo
+# 6. 运行所有 Demo
 # ============================================================
 if __name__ == "__main__":
     demo_simple_message_passing()
-    model, features, adj, labels, pred = train_karate_club()
-    visualize_embeddings(model, features, adj, labels, pred)
+
+    print("\n" + "#" * 60)
+    print("# GCN 训练")
+    print("#" * 60)
+    model_gcn, features, adj, labels, pred_gcn = train_karate_club()
+    visualize_embeddings(model_gcn, features, adj, labels, pred_gcn,
+                         "GCN")
+
+    print("\n" + "#" * 60)
+    print("# GAT 训练")
+    print("#" * 60)
+    model_gat, _, _, _, pred_gat = train_karate_club_gat()
