@@ -1,5 +1,6 @@
 """用训练好的模型预测新分子"""
 
+
 import warnings
 warnings.filterwarnings('ignore')
 from rdkit import RDLogger; RDLogger.logger().setLevel(RDLogger.ERROR)
