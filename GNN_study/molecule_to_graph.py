@@ -12,7 +12,6 @@ HYBRID_TYPES = [Chem.rdchem.HybridizationType.SP,
 
 
 def atom_features(atom):
-    """Extract node features for an RDKit Atom."""
     feats = []
     # (1) Atomic type one-hot (10 common + 1 for others)
     feats += [int(atom.GetAtomicNum() == t) for t in ATOM_TYPES]
