@@ -249,6 +249,7 @@ for epoch in range(1, 51):
         print(f"Epoch {epoch:3d} | Train loss: {train_loss:.4f} | Val loss: {val_loss:.4f}")
 
 # Test
+
 model.load_state_dict(torch.load('best_model.pt', weights_only=False))
 test_loss, preds, labels, masks = eval_epoch(test_loader)
 print(f"\nTest loss: {test_loss:.4f}")
