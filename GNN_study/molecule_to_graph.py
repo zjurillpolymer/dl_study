@@ -32,13 +32,13 @@ def atom_features(atom):
     # (5) Hybridization one-hot
     feats += [int(atom.GetHybridization() == h) for h in HYBRID_TYPES]
 
-    # (6) Aromatic
+    # (6) Aromatic 芳香性
     feats.append(int(atom.GetIsAromatic()))
 
     # (7) In ring
     feats.append(int(atom.IsInRing()))
 
-    # (8) Chiral
+    # (8) Chiral 手性
     feats.append(int(atom.GetChiralTag() != Chem.rdchem.ChiralType.CHI_UNSPECIFIED))
 
     return feats
