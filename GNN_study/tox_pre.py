@@ -169,7 +169,7 @@ class Mol_tox_GAT(nn.Module):
     def __init__(self,in_channels=29,edge_dim=6,hidden=64,heads=4,num_tasks=12):
         super().__init__()
         self.gat1 = GATConv(in_channels,hidden,heads=heads,edge_dim=edge_dim,concat=True) #64*4=256
-        self.gat2=GATConv(hidden*heads,hidden,heads=heads,edge_dim=edge_dim,concat=True)
+        self.gat2 = GATConv(hidden*heads,hidden,heads=heads,edge_dim=edge_dim,concat=True)
         self.lin=nn.Linear(hidden*heads,num_tasks)
 
     def forward(self,x,edge_index, edge_attr, batch):
