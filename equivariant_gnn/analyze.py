@@ -76,8 +76,8 @@ force_pred_phys = force_pred * force_std + force_mean
 force_rmse = (force_pred_phys - force_true).pow(2).mean().sqrt().item()
 
 print(f"测试集结果 (标准化空间):")
-print(f"  能量 RMSE (std): {energy_rmse:.6f} Hartree")
-print(f"  力   RMSE (std): {force_rmse:.6f} Hartree/Bohr")
+print(f"  能量 RMSE (std): {energy_rmse:.4f} kcal/mol")
+print(f"  力   RMSE (std): {force_rmse:.4f} kcal/(mol·Å)")
 
 # ── 1. 能量散点图 ──
 fig, axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -86,8 +86,8 @@ ax = axes[0]
 ax.scatter(energy_true_phys, energy_pred_phys, s=8, alpha=0.5, c='#1f77b4')
 lim = [energy_true_phys.min(), energy_true_phys.max()]
 ax.plot(lim, lim, 'k--', lw=1, label='Perfect')
-ax.set_xlabel('True Energy (Hartree)')
-ax.set_ylabel('Predicted Energy (Hartree)')
+ax.set_xlabel('True Energy (kcal/mol)')
+ax.set_ylabel('Predicted Energy (kcal/mol)')
 ax.set_title(f'Energy Prediction\nRMSE = {energy_rmse:.6f}')
 ax.legend()
 ax.set_aspect('equal')
@@ -110,7 +110,7 @@ n_show = min(16, len(energy_true))
 ax.plot(range(n_show), energy_true_phys[:n_show], 'o-', label='True', ms=4)
 ax.plot(range(n_show), energy_pred_phys[:n_show], 's--', label='Pred', ms=4)
 ax.set_xlabel('Conformation index')
-ax.set_ylabel('Energy (Hartree)')
+ax.set_ylabel('Energy (kcal/mol)')
 ax.set_title('Energy along trajectory (first 16)')
 ax.legend()
 
@@ -139,10 +139,10 @@ pos_rotated = sample.pos @ rotation.T
 e_rot = model(sample.z, pos_rotated, ei, None)
 e_rot_phys = e_rot.item() * energy_std + energy_mean
 
-print(f"原始能量: {e_orig_phys:.6f} Hartree")
-print(f"旋转后能量: {e_rot_phys:.6f} Hartree")
+print(f"原始能量: {e_orig_phys:.6f} kcal/mol")
+print(f"旋转后能量: {e_rot_phys:.6f} kcal/mol")
 diff = abs(e_orig_phys - e_rot_phys)
-print(f"差值: {diff:.8f} Hartree")
+print(f"差值: {diff:.8f} kcal/mol")
 print(f"等变性: {'✓ 通过' if diff < 1e-4 else '✗ 不通过'}")
 
 # 平移不变性
@@ -150,8 +150,8 @@ pos_shifted = sample.pos + torch.tensor([1.0, 2.0, 3.0]).to(device)
 e_shift = model(sample.z, pos_shifted, ei, None)
 e_shift_phys = e_shift.item() * energy_std + energy_mean
 diff_shift = abs(e_orig_phys - e_shift_phys)
-print(f"\n平移后能量: {e_shift_phys:.6f} Hartree")
-print(f"差值: {diff_shift:.8f} Hartree")
+print(f"\n平移后能量: {e_shift_phys:.6f} kcal/mol")
+print(f"差值: {diff_shift:.8f} kcal/mol")
 print(f"平移不变性: {'✓ 通过' if diff_shift < 1e-4 else '✗ 不通过'}")
 
 print(f"\n可视化文件: {save_path}")

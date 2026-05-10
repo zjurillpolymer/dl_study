@@ -36,17 +36,18 @@ energy_mean, energy_std = energy_stats.mean(), energy_stats.std()
 force_mean, force_std = force_stats.mean(), force_stats.std()
 print(f"能量: mean={energy_mean:.4f}, std={energy_std:.4f}")
 print(f"力:   mean={force_mean:.4f}, std={force_std:.4f}")
+print(f"每分子力分量数: {force_stats.shape[0] // N_TRAIN} × 3 = {force_stats.shape[-1]}")
 
 train_loader = DataLoader(dataset[:N_TRAIN], batch_size=16, shuffle=True)
 val_loader   = DataLoader(dataset[N_TRAIN:N_TRAIN + N_VAL], batch_size=16, shuffle=False)
 test_loader  = DataLoader(dataset[N_TRAIN + N_VAL:N_TRAIN + N_VAL + N_TEST], batch_size=16, shuffle=False)
 
 # ── 模型 ──
-model = EGNN(num_atom_types=10, hidden_dim=128, n_layers=4).to(device)
+model = EGNN(num_atom_types=10, hidden_dim=128, n_layers=6).to(device)
 print(f"参数量: {sum(p.numel() for p in model.parameters()):,}")
 
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=80)
 
 
 def normalize(batch):
@@ -69,7 +70,7 @@ def train_epoch():
 
         loss_e = F.mse_loss(e_pred, e_tgt)
         loss_f = F.mse_loss(f_pred, f_tgt)
-        loss = loss_e + loss_f * 0.5
+        loss = loss_e + loss_f * 1.0
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
@@ -80,6 +81,12 @@ def train_epoch():
 
     n = len(train_loader.dataset)
     return total_e / n, total_f / n
+
+
+def print_epoch(i, e, f, v, t):
+    print(f"{i:6d} | {e:10.4f} | {f:10.4f} | {v:10.4f} | {t:6.1f}s")
+    if i == 1:
+        print(f"  (能量 MAE ≈ {e**0.5 * energy_std * (2/3.14159)**0.5:.2f}, 力 MAE ≈ {f**0.5 * force_std * (2/3.14159)**0.5:.2f})")
 
 
 @torch.no_grad()
@@ -100,7 +107,7 @@ print(f"\n{'Epoch':>6} | {'E Loss':>10} | {'F Loss':>10} | {'Val Loss':>10} | {'
 print("-" * 52)
 
 best_val = float('inf')
-for epoch in range(1, 51):
+for epoch in range(1, 81):
     t0 = time.time()
     loss_e, loss_f = train_epoch()
     val_loss = eval_epoch()
@@ -112,7 +119,7 @@ for epoch in range(1, 51):
         torch.save(model.state_dict(), os.path.join(SCRIPT_DIR, 'egnn_best.pt'))
 
     if epoch == 1 or epoch % 5 == 0:
-        print(f"{epoch:6d} | {loss_e:10.6f} | {loss_f:10.6f} | {val_loss:10.6f} | {elapsed:6.1f}s")
+        print_epoch(epoch, loss_e, loss_f, val_loss, elapsed)
 
 # ── 测试 ──
 model.load_state_dict(torch.load(os.path.join(SCRIPT_DIR, 'egnn_best.pt'), weights_only=True))
@@ -144,6 +151,6 @@ force_mae /= n_atoms_total * 3
 print(f"\n{'='*50}")
 print("测试集结果")
 print(f"{'='*50}")
-print(f"  能量 MAE: {energy_mae:.6f} Hartree")
-print(f"  力   MAE: {force_mae:.6f} Hartree/Bohr")
+print(f"  能量 MAE: {energy_mae:.4f} kcal/mol")
+print(f"  力   MAE: {force_mae:.4f} kcal/(mol·Å)")
 print(f"{'='*50}")

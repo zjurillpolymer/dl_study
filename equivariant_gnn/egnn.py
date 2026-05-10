@@ -1,12 +1,7 @@
 """
-分子势能预测 — 等变消息传递网络
-
-核心设计：
-  - 边特征 = RBF 展开 ||xi - xj||（旋转不变）
-  - 消息 φ_m(hi, hj, RBF(d)) → 连续滤波卷积
-  - 节点更新 h_new = h + φ_h([h, Σm_ij])（残差）
-  - 能量 = Σ φ_out(h_i)（求和不变）
-  - 力 = -∇_x E（autograd）
+SchNet 风格等变消息传递网络
+- 连续滤波卷积: m_ij = h_j ⊙ W(RBF(||xi-xj||))
+- Shifted Softplus 激活
 """
 import torch
 import torch.nn as nn
@@ -31,37 +26,41 @@ def batch_fully_connected_edges(batch_ptr, device='cpu'):
     return torch.cat(edge_indices, dim=1).to(device)
 
 
-class RBFExpansion(nn.Module):
-    """高斯径向基函数展开: ||xi - xj|| → [exp(-γ(d - μ_k)²)]"""
+class ShiftedSoftplus(nn.Module):
+    """SchNet 使用的激活函数: ln(0.5 + 0.5*exp(x))，比 ReLU 更平滑"""
+    def forward(self, x):
+        return F.softplus(x) - 0.5  # shifted so f(0) = ln(2) - 0.5 ≈ 0.19
 
-    def __init__(self, n_rbf=32, cutoff=10.0):
+
+class RBFExpansion(nn.Module):
+    """高斯径向基函数展开"""
+    def __init__(self, n_rbf=32, cutoff=4.0):
         super().__init__()
-        self.n_rbf = n_rbf
         centers = torch.linspace(0, cutoff, n_rbf)
         self.register_buffer('centers', centers)
-        self.gamma = 1.0 / (cutoff / n_rbf)
+        self.gamma = 0.5 / (cutoff / n_rbf) ** 2
 
-    def forward(self, distances):
-        d = distances  # [n, 1] already
-        c = self.centers.unsqueeze(0)  # [1, n_rbf]
-        return torch.exp(-self.gamma * (d - c) ** 2)  # [n, n_rbf]
+    def forward(self, dist):
+        d = dist
+        c = self.centers.unsqueeze(0)
+        return torch.exp(-self.gamma * (d - c) ** 2)
 
 
-class MessageLayer(nn.Module):
-    """消息传递层（残差连接）"""
+class SchNetConv(nn.Module):
+    """连续滤波卷积层（SchNet 核心）"""
 
     def __init__(self, hidden_dim, rbf_dim=32):
         super().__init__()
-        # 消息网络: [h_i, h_j, RBF(d)] → m_ij
-        self.msg_net = nn.Sequential(
-            nn.Linear(hidden_dim * 2 + rbf_dim, hidden_dim),
-            nn.ReLU(),
+        # 连续滤波: RBF(d) → [hidden_dim]（只依赖距离）
+        self.filter_net = nn.Sequential(
+            nn.Linear(rbf_dim, hidden_dim),
+            ShiftedSoftplus(),
             nn.Linear(hidden_dim, hidden_dim),
         )
-        # 节点更新: [h, Σm] → Δh（残差）
+        # 更新网络: Σ m_ij → 新特征
         self.update_net = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            ShiftedSoftplus(),
             nn.Linear(hidden_dim, hidden_dim),
         )
 
@@ -70,43 +69,37 @@ class MessageLayer(nn.Module):
         i, j = edge_index
 
         rel_pos = x[i] - x[j]
-        dist = rel_pos.norm(dim=-1, keepdim=True)  # [n_edges, 1]
-        rbf_feat = rbf(dist)  # [n_edges, rbf_dim]
+        dist = rel_pos.norm(dim=-1, keepdim=True)
+        rbf_feat = rbf(dist)
 
-        m_ij = self.msg_net(torch.cat([h[i], h[j], rbf_feat], dim=-1))
+        # 连续滤波: W = f(RBF(d))，和源特征逐元素乘
+        W = self.filter_net(rbf_feat)
+        m_ij = h[j] * W  # [n_edges, hidden_dim]
 
+        # 聚合（对目标节点求和）
+        aggr = torch.zeros(n, h.size(1), device=h.device)
+        aggr = aggr.index_add(0, i, m_ij)
         deg = torch.zeros(n, device=h.device)
         deg = deg.index_add(0, i, torch.ones(m_ij.size(0), device=h.device))
-        aggr = torch.zeros_like(h)
-        aggr = aggr.index_add(0, i, m_ij) / deg.clamp(min=1).view(-1, 1)
+        aggr = aggr / deg.clamp(min=1).view(-1, 1)
 
-        h_new = self.update_net(torch.cat([h, aggr], dim=-1))
+        h_new = self.update_net(aggr)
         return h_new, x
 
 
-class EGNN(nn.Module):
-    """等变消息传递网络 — 预测分子能量 + 力"""
+class OutputBlock(nn.Module):
+    """逐原子 MLP + 求和输出能量"""
 
-    def __init__(self, num_atom_types=10, hidden_dim=128, n_layers=4):
+    def __init__(self, hidden_dim):
         super().__init__()
-        self.atom_embed = nn.Embedding(num_atom_types + 1, hidden_dim)
-        self.rbf = RBFExpansion(n_rbf=32, cutoff=10.0)
-        self.layers = nn.ModuleList([
-            MessageLayer(hidden_dim) for _ in range(n_layers)
-        ])
-        self.output_net = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+        self.net = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), ShiftedSoftplus(),
+            nn.Linear(hidden_dim, hidden_dim), ShiftedSoftplus(),
             nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, z, pos, edge_index, batch=None):
-        h = self.atom_embed(z)
-        for layer in self.layers:
-            h, pos = layer(h, pos, edge_index, self.rbf)
-
-        E_atom = self.output_net(h).squeeze(-1)
-
+    def forward(self, h, batch=None):
+        E_atom = self.net(h).squeeze(-1)
         if batch is not None:
             n_graphs = batch.max().item() + 1
             energy = torch.zeros(n_graphs, device=h.device)
@@ -114,6 +107,25 @@ class EGNN(nn.Module):
         else:
             energy = E_atom.sum()
         return energy
+
+
+class EGNN(nn.Module):
+    """SchNet 风格网络 — 预测分子能量 + 力"""
+
+    def __init__(self, num_atom_types=10, hidden_dim=128, n_layers=6):
+        super().__init__()
+        self.atom_embed = nn.Embedding(num_atom_types + 1, hidden_dim)
+        self.rbf = RBFExpansion(n_rbf=32, cutoff=4.0)
+        self.convs = nn.ModuleList([
+            SchNetConv(hidden_dim) for _ in range(n_layers)
+        ])
+        self.output = OutputBlock(hidden_dim)
+
+    def forward(self, z, pos, edge_index, batch=None):
+        h = self.atom_embed(z)
+        for conv in self.convs:
+            h, pos = conv(h, pos, edge_index, self.rbf)
+        return self.output(h, batch)
 
     def energy_and_forces(self, z, pos, edge_index, batch=None, create_graph=True):
         pos.requires_grad_(True)
