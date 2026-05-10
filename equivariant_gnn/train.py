@@ -16,6 +16,11 @@ from torch_geometric.loader import DataLoader
 
 from egnn import EGNN, batch_fully_connected_edges
 
+# ── 4080 优化 ──
+torch.set_float32_matmul_precision('high')
+torch.backends.cudnn.benchmark = True
+torch._dynamo.config.capture_scalar_outputs = True
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"设备: {device}")
 
@@ -38,16 +43,26 @@ print(f"能量: mean={energy_mean:.4f}, std={energy_std:.4f}")
 print(f"力:   mean={force_mean:.4f}, std={force_std:.4f}")
 print(f"每分子力分量数: {force_stats.shape[0] // N_TRAIN} × 3 = {force_stats.shape[-1]}")
 
-train_loader = DataLoader(dataset[:N_TRAIN], batch_size=16, shuffle=True)
-val_loader   = DataLoader(dataset[N_TRAIN:N_TRAIN + N_VAL], batch_size=16, shuffle=False)
-test_loader  = DataLoader(dataset[N_TRAIN + N_VAL:N_TRAIN + N_VAL + N_TEST], batch_size=16, shuffle=False)
+train_loader = DataLoader(
+    dataset[:N_TRAIN], batch_size=256, shuffle=True,
+    num_workers=4, pin_memory=True)
+val_loader   = DataLoader(
+    dataset[N_TRAIN:N_TRAIN + N_VAL], batch_size=256, shuffle=False,
+    num_workers=4, pin_memory=True)
+test_loader  = DataLoader(
+    dataset[N_TRAIN + N_VAL:N_TRAIN + N_VAL + N_TEST], batch_size=256, shuffle=False,
+    num_workers=4, pin_memory=True)
 
 # ── 模型 ──
 model = EGNN(num_atom_types=10, hidden_dim=128, n_layers=6).to(device)
+model = torch.compile(model)
 print(f"参数量: {sum(p.numel() for p in model.parameters()):,}")
 
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=80)
+cos_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=300)
+plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', factor=0.5, patience=20, min_lr=1e-6)
+scaler = torch.amp.GradScaler()
 
 
 def normalize(batch):
@@ -60,21 +75,23 @@ def train_epoch():
     model.train()
     total_e, total_f = 0, 0
     for batch in train_loader:
-        batch = batch.to(device)
+        batch = batch.to(device, non_blocking=True)
         edge_index = batch_fully_connected_edges(batch.ptr, device)
         optimizer.zero_grad()
 
-        e_pred, f_pred = model.energy_and_forces(
-            batch.z, batch.pos, edge_index, batch.batch)
-        e_tgt, f_tgt = normalize(batch)
+        with torch.amp.autocast(device_type='cuda'):
+            e_pred, f_pred = model.energy_and_forces(
+                batch.z, batch.pos, edge_index, batch.batch)
+            e_tgt, f_tgt = normalize(batch)
+            loss_e = F.mse_loss(e_pred, e_tgt)
+            loss_f = F.mse_loss(f_pred, f_tgt)
+            loss = loss_e + loss_f * 1.0
 
-        loss_e = F.mse_loss(e_pred, e_tgt)
-        loss_f = F.mse_loss(f_pred, f_tgt)
-        loss = loss_e + loss_f * 1.0
-
-        loss.backward()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
 
         total_e += loss_e.item() * batch.num_graphs
         total_f += loss_f.item() * batch.num_graphs
@@ -94,9 +111,10 @@ def eval_epoch():
     model.eval()
     total = 0
     for batch in val_loader:
-        batch = batch.to(device)
+        batch = batch.to(device, non_blocking=True)
         edge_index = batch_fully_connected_edges(batch.ptr, device)
-        e_pred = model(batch.z, batch.pos, edge_index, batch.batch)
+        with torch.amp.autocast(device_type='cuda'):
+            e_pred = model(batch.z, batch.pos, edge_index, batch.batch)
         e_tgt, _ = normalize(batch)
         total += F.mse_loss(e_pred, e_tgt).item() * batch.num_graphs
     return total / len(val_loader.dataset)
@@ -107,11 +125,12 @@ print(f"\n{'Epoch':>6} | {'E Loss':>10} | {'F Loss':>10} | {'Val Loss':>10} | {'
 print("-" * 52)
 
 best_val = float('inf')
-for epoch in range(1, 81):
+for epoch in range(1, 301):
     t0 = time.time()
     loss_e, loss_f = train_epoch()
     val_loss = eval_epoch()
-    scheduler.step()
+    cos_scheduler.step()
+    plateau_scheduler.step(val_loss)
     elapsed = time.time() - t0
 
     if val_loss < best_val:
@@ -124,23 +143,55 @@ for epoch in range(1, 81):
 # ── 测试 ──
 model.load_state_dict(torch.load(os.path.join(SCRIPT_DIR, 'egnn_best.pt'), weights_only=True))
 model.eval()
+torch.compiler.reset()  # 强制重新编译，排除缓存问题
 
 energy_mae = 0
 force_mae = 0
 n_test = 0
 for batch in test_loader:
-    batch = batch.to(device)
+    batch = batch.to(device, non_blocking=True)
     edge_index = batch_fully_connected_edges(batch.ptr, device)
 
-    with torch.no_grad():
+    with torch.no_grad(), torch.amp.autocast(device_type='cuda'):
         energy_pred = model(batch.z, batch.pos, edge_index, batch.batch)
-    _, forces_pred = model.energy_and_forces(
-        batch.z, batch.pos, edge_index, batch.batch, create_graph=False)
+
+    # 诊断：检查各变量的 dtype、device、是否含 inf/nan
+    print(f"\n--- 诊断 ---")
+    print(f"energy_pred: shape={energy_pred.shape}, dtype={energy_pred.dtype}, device={energy_pred.device}, "
+          f"inf={torch.isinf(energy_pred).any()}, nan={torch.isnan(energy_pred).any()}, "
+          f"min={energy_pred.min():.4f}, max={energy_pred.max():.4f}")
+    print(f"energy_std:  dtype={energy_std.dtype}, device={energy_std.device}")
+    print(f"energy_mean: dtype={energy_mean.dtype}, device={energy_mean.device}")
+    print(f"energy_true: shape={batch.energy.shape}, dtype={batch.energy.dtype}, device={batch.energy.device}, "
+          f"inf={torch.isinf(batch.energy).any()}, nan={torch.isnan(batch.energy).any()}, "
+          f"min={batch.energy.min():.4f}, max={batch.energy.max():.4f}")
+
+    energy_diff = (energy_pred * energy_std.to(device) + energy_mean.to(device) - batch.energy)
+    print(f"energy_diff: "
+          f"inf={torch.isinf(energy_diff).any()}, nan={torch.isnan(energy_diff).any()}, "
+          f"min={energy_diff.min():.4f}, max={energy_diff.max():.4f}")
+    # 如果有 inf，看一下哪些位置
+    if torch.isinf(energy_diff).any():
+        inf_idx = torch.where(torch.isinf(energy_diff))
+        print(f"    inf at indices: {inf_idx}")
+        print(f"    energy_pred at those: {energy_pred[inf_idx]}")
+        print(f"    energy_true at those: {batch.energy[inf_idx]}")
+    print(f"--- 诊断结束 ---\n")
+
+    pos = batch.pos.clone().detach().requires_grad_(True)
+    with torch.amp.autocast(device_type='cuda'):
+        energy_grad = model(batch.z, pos, edge_index, batch.batch)
+    forces_pred = -torch.autograd.grad(energy_grad.sum(), pos, create_graph=False)[0]
+
+    if torch.isinf(energy_grad).any() or torch.isnan(energy_grad).any():
+        print(f"    *** energy_grad (for forces) also has inf/nan!")
+    else:
+        print(f"    energy_grad OK: min={energy_grad.min():.4f}, max={energy_grad.max():.4f}")
 
     energy_true = batch.energy
     forces_true = batch.force
 
-    energy_mae += (energy_pred * energy_std + energy_mean - energy_true).abs().sum().item()
+    energy_mae += (energy_pred * energy_std.to(device) + energy_mean.to(device) - energy_true).abs().sum().item()
     force_mae += (forces_pred * force_std + force_mean - forces_true).abs().sum().item()
     n_test += batch.num_graphs
 
